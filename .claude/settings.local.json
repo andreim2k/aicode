@@ -8,7 +8,11 @@
       "Bash(xxd:*)",
       "Bash(bash:*)",
       "Bash(timeout 1 ./aicode/aicode:*)",
-      "Bash(timeout 2 stdbuf -oL ./aicode/aicode:*)"
+      "Bash(timeout 2 stdbuf -oL ./aicode/aicode:*)",
+      "Bash(jq:*)",
+      "Bash(env)",
+      "Bash(./aicode/aicode:*)",
+      "Bash(DEBUG=1 timeout 5 /Users/andrei/Development/aicode/aicode:*)"
     ],
     "deny": [],
     "ask": []
