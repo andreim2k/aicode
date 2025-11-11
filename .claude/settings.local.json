@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash:*)",
+      "Bash(curl:*)",
+      "Bash(zsh:*)",
+      "Bash(cat:*)",
+      "Bash(while read line)",
+      "Bash(do echo \"$line\")",
+      "Bash(done)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
