@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(./aicode:*)",
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(xxd:*)",
+      "Bash(bash:*)",
+      "Bash(timeout 1 ./aicode/aicode:*)",
+      "Bash(timeout 2 stdbuf -oL ./aicode/aicode:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
