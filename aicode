@@ -180,7 +180,9 @@ show_provider_menu() {
                 if [ -f "${CLAUDE_CONFIG_FILE}" ]; then
                     rm "${CLAUDE_CONFIG_FILE}"
                 fi
-                printf "\n[1;32mUsing provider:[0m [1;36m%s[0m\n" "$selected_item"
+                unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL 2>/dev/null
+                echo -e "\n\033[1;32mUsing provider:\033[0m \033[1;36m${selected_item}\033[0m"
+                echo -e "\033[38;5;246mInitializing Claude (this may take a moment)...\033[0m"
                 break
             fi
             
@@ -334,6 +336,11 @@ apply_provider_config() {
 
 # Show menu and get selection
 show_menu
+
+# Debug: Show what we're about to run
+if [ "${DEBUG:-0}" == "1" ]; then
+    echo "[DEBUG] About to execute: claude with args: '$@'" >&2
+fi
 
 # Run claude command and pass all arguments
 exec claude "$@"
