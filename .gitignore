@@ -18,3 +18,8 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+*.bak[0-9]*
+
+# Compiled binaries
+z-ai-proxy
+x-ai-proxy

@@ -117,28 +117,46 @@ install_script() {
 build_proxy() {
     print_step "Building proxy binaries..."
     
+    # Change to script directory for building (needed for go.mod)
+    cd "$SCRIPT_DIR" || {
+        print_error "Failed to change to script directory"
+        return 1
+    }
+    
     # Build z-ai-proxy
     if [ -f "$SCRIPT_DIR/z-ai-proxy.go" ]; then
-        if ! go build -o "$CONFIG_DIR/z-ai-proxy" "$SCRIPT_DIR/z-ai-proxy.go" 2>/dev/null; then
+        print_info "Building z-ai-proxy..."
+        if ! go build -o "$CONFIG_DIR/z-ai-proxy" "$SCRIPT_DIR/z-ai-proxy.go" 2>&1 | tee /tmp/z-ai-proxy-build.log; then
             print_error "Failed to build z-ai-proxy"
-            print_info "Make sure Go is installed and z-ai-proxy.go is valid"
+            if [ -f /tmp/z-ai-proxy-build.log ]; then
+                print_info "Build errors:"
+                cat /tmp/z-ai-proxy-build.log
+            fi
+            print_info "Make sure Go is installed and dependencies are available (run: go mod tidy)"
             return 1
         fi
         chmod +x "$CONFIG_DIR/z-ai-proxy"
         print_success "Built and installed z-ai-proxy to $CONFIG_DIR"
+        rm -f /tmp/z-ai-proxy-build.log 2>/dev/null || true
     else
         print_info "z-ai-proxy.go not found, skipping z-ai-proxy build"
     fi
     
     # Build x-ai-proxy
     if [ -f "$SCRIPT_DIR/x-ai-proxy.go" ]; then
-        if ! go build -o "$CONFIG_DIR/x-ai-proxy" "$SCRIPT_DIR/x-ai-proxy.go" 2>/dev/null; then
+        print_info "Building x-ai-proxy..."
+        if ! go build -o "$CONFIG_DIR/x-ai-proxy" "$SCRIPT_DIR/x-ai-proxy.go" 2>&1 | tee /tmp/x-ai-proxy-build.log; then
             print_error "Failed to build x-ai-proxy"
-            print_info "Make sure Go is installed and x-ai-proxy.go is valid"
+            if [ -f /tmp/x-ai-proxy-build.log ]; then
+                print_info "Build errors:"
+                cat /tmp/x-ai-proxy-build.log
+            fi
+            print_info "Make sure Go is installed and dependencies are available (run: go mod tidy)"
             return 1
         fi
         chmod +x "$CONFIG_DIR/x-ai-proxy"
         print_success "Built and installed x-ai-proxy to $CONFIG_DIR"
+        rm -f /tmp/x-ai-proxy-build.log 2>/dev/null || true
     else
         print_info "x-ai-proxy.go not found, skipping x-ai-proxy build"
     fi
