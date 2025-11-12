@@ -2,8 +2,28 @@
 
 set -euo pipefail
 
-# Restore cursor and exit on interrupt
-trap 'printf "\033[?25h"; exit 0' INT TERM EXIT
+# Global variables for proxy cleanup
+PROXY_PID=""
+PROXY_PORT=""
+PROXY_LOG=""
+PROXY_CLEANED_UP=false
+
+# Cleanup function that handles both cursor restoration and proxy cleanup
+cleanup_on_exit() {
+    # Restore cursor
+    printf "\033[?25h"
+    
+    # Cleanup proxy if it was started and not already cleaned up
+    if [ "$PROXY_CLEANED_UP" = false ] && ([ -n "$PROXY_PID" ] || [ -n "$PROXY_PORT" ]); then
+        cleanup_proxy "$PROXY_PORT" "$PROXY_PID" "$PROXY_LOG" 2>/dev/null || true
+        PROXY_CLEANED_UP=true
+    fi
+    
+    exit 0
+}
+
+# Set trap for cleanup on exit/interrupt
+trap cleanup_on_exit INT TERM EXIT
 
 # Check if claude is installed
 if ! command -v claude &> /dev/null; then
@@ -558,6 +578,222 @@ apply_provider_config() {
     printf "\n[1;32mUsing provider:[0m [1;36m%s[0m ([1;33m%s[0m)\n" "$SELECTED_PROVIDER" "$SELECTED_MODEL"
 }
 
+# Function to cleanup proxy processes
+# This only cleans up THIS instance's proxy, allowing multiple instances to run simultaneously
+cleanup_proxy() {
+    local port="$1"
+    local pid="$2"
+    local log_file="$3"
+    local proxy_stopped=false
+    
+    # Only kill the specific PID we started (don't kill other instances)
+    if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
+        # Verify it's actually listening on our port before killing
+        local pid_on_port=$(lsof -ti:${port} 2>/dev/null | grep -w "$pid" || true)
+        if [ -n "$pid_on_port" ]; then
+            kill "$pid" 2>/dev/null || true
+            # Wait up to 3 seconds for graceful shutdown
+            local count=0
+            while ps -p "$pid" > /dev/null 2>&1 && [ $count -lt 6 ]; do
+                sleep 0.5
+                count=$((count + 1))
+            done
+            # Force kill if still running
+            if ps -p "$pid" > /dev/null 2>&1; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            proxy_stopped=true
+        fi
+    fi
+    
+    # Only clean up processes on our specific port that match our PID
+    # This prevents interfering with other instances
+    if [ -n "$port" ] && [ -n "$pid" ]; then
+        local pids_on_port=$(lsof -ti:${port} 2>/dev/null || true)
+        if [ -n "$pids_on_port" ]; then
+            # Only kill if our PID is in the list
+            if echo "$pids_on_port" | grep -w "$pid" > /dev/null 2>&1; then
+                kill -9 "$pid" 2>/dev/null || true
+                proxy_stopped=true
+            fi
+        fi
+    fi
+    
+    # Verify proxy is actually stopped and print confirmation message
+    if [ -n "$port" ]; then
+        # Check if proxy process is still running
+        if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
+            # Process still exists, try one more force kill
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 0.2
+        fi
+        # Verify it's actually stopped (check both PID and port)
+        local still_running=false
+        if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
+            still_running=true
+        elif [ -n "$port" ] && lsof -ti:${port} > /dev/null 2>&1; then
+            # Check if our PID is still on the port
+            local pids_on_port=$(lsof -ti:${port} 2>/dev/null || true)
+            if [ -n "$pids_on_port" ] && [ -n "$pid" ]; then
+                if echo "$pids_on_port" | grep -w "$pid" > /dev/null 2>&1; then
+                    still_running=true
+                fi
+            fi
+        fi
+        
+        # Print confirmation message
+        if [ "$still_running" = false ]; then
+            printf "\033[1;32m[OK]\033[0m Proxy stopped on port %s\n" "$port"
+        fi
+    fi
+    
+    # Remove log file if specified (instance-specific log file)
+    if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+        rm -f "$log_file" 2>/dev/null || true
+    fi
+}
+
+# Function to check if port is available
+check_port_available() {
+    local port="$1"
+    if lsof -ti:${port} > /dev/null 2>&1; then
+        return 1  # Port is in use
+    fi
+    return 0  # Port is available
+}
+
+# Function to find an available random port
+# This ensures each instance gets a unique port, allowing multiple instances to run simultaneously
+find_random_port() {
+    local min_port=9000
+    local max_port=65535
+    local attempts=0
+    local max_attempts=200  # Increased attempts for better randomness
+    
+    # Use process ID and timestamp to seed randomness for better distribution
+    local seed=$(($$ + $(date +%s)))
+    RANDOM=$seed
+    
+    while [ $attempts -lt $max_attempts ]; do
+        # Generate random port between min_port and max_port
+        # Using $$ (process ID) helps ensure different instances get different ports
+        local port=$((RANDOM % (max_port - min_port + 1) + min_port))
+        
+        if check_port_available "$port"; then
+            echo "$port"
+            return 0
+        fi
+        
+        attempts=$((attempts + 1))
+        # Reseed occasionally to avoid getting stuck in a pattern
+        if [ $((attempts % 10)) -eq 0 ]; then
+            RANDOM=$(($$ + $(date +%s) + attempts))
+        fi
+    done
+    
+    # Fallback: try sequential ports starting from a random point
+    local start_port=$((RANDOM % (max_port - min_port + 1) + min_port))
+    for port in $(seq $start_port $max_port) $(seq $min_port $((start_port - 1))); do
+        if check_port_available "$port"; then
+            echo "$port"
+            return 0
+        fi
+    done
+    
+    return 1  # No available port found
+}
+
+# Function to start proxy with proper error handling
+start_proxy() {
+    local provider="$1"
+    local port="$2"
+    local base_url="$3"
+    local auth_token="$4"
+    local proxy_binary="$5"
+    
+    # Check if proxy binary exists
+    if [ ! -f "$proxy_binary" ]; then
+        printf "\n\033[1;31mError: Proxy binary not found at %s\033[0m\n" "$proxy_binary"
+        printf "Please run install.sh to build the proxy\n"
+        return 1
+    fi
+    
+    # Check and free port if needed
+    if ! check_port_available "$port"; then
+        printf "\n\033[1;33mWarning: Port %s is in use, attempting to free it...\033[0m\n" "$port"
+        local pids_on_port=$(lsof -ti:${port} 2>/dev/null || true)
+        if [ -n "$pids_on_port" ]; then
+            echo "$pids_on_port" | xargs kill -9 2>/dev/null || true
+            sleep 1
+        fi
+        # Verify port is now free
+        if ! check_port_available "$port"; then
+            printf "\033[1;31mError: Could not free port %s\033[0m\n" "$port"
+            return 1
+        fi
+    fi
+    
+    # Create log file with PID to ensure uniqueness across multiple instances
+    local proxy_log="${CONFIG_DIR}/${provider}-proxy-$$.log"
+    
+    # Start proxy with command-line flags
+    if [ "$provider" == "zai" ]; then
+        "$proxy_binary" \
+            -port "$port" \
+            -z-ai-url "$base_url" \
+            -z-ai-token "$auth_token" > "$proxy_log" 2>&1 &
+    elif [ "$provider" == "xai" ]; then
+        "$proxy_binary" \
+            -port "$port" \
+            -xai-url "$base_url" \
+            -xai-token "$auth_token" > "$proxy_log" 2>&1 &
+    else
+        printf "\033[1;31mError: Unknown provider: %s\033[0m\n" "$provider"
+        return 1
+    fi
+    
+    local proxy_pid=$!
+    
+    # Wait for proxy to start and verify it's running
+    local count=0
+    while [ $count -lt 10 ]; do
+        sleep 0.5
+        if ! ps -p "$proxy_pid" > /dev/null 2>&1; then
+            printf "\n\033[1;31mError: %s proxy failed to start\033[0m\n" "$provider"
+            if [ -f "$proxy_log" ]; then
+                printf "Proxy error log:\n"
+                cat "$proxy_log"
+            fi
+            return 1
+        fi
+        if check_port_available "$port"; then
+            count=$((count + 1))
+        else
+            break  # Port is now in use, proxy started successfully
+        fi
+    done
+    
+    # Final verification
+    if check_port_available "$port"; then
+        printf "\n\033[1;31mError: %s proxy is not listening on port %s\033[0m\n" "$provider" "$port"
+        kill "$proxy_pid" 2>/dev/null || true
+        if [ -f "$proxy_log" ]; then
+            printf "Proxy error log:\n"
+            cat "$proxy_log"
+        fi
+        return 1
+    fi
+    
+    printf "\n\033[1;32m[OK]\033[0m %s proxy started on port %s (PID: %s)\n" "$provider" "$port" "$proxy_pid"
+    
+    # Store proxy info in global variables for cleanup
+    PROXY_PID="$proxy_pid"
+    PROXY_PORT="$port"
+    PROXY_LOG="$proxy_log"
+    
+    return 0
+}
+
 # Show menu and get selection
 show_menu
 
@@ -569,31 +805,28 @@ if [ "$SELECTED_PROVIDER" == "zai" ]; then
     # Override to use the correct Z.AI API endpoint
     proxy_base_url="https://api.z.ai/api/paas/v4"
     
-    # Kill any existing process on port 9000
-    proxy_port=9000
-    lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    sleep 0.5
+    # Find an available random port
+    proxy_port=$(find_random_port)
+    if [ -z "$proxy_port" ] || [ "$proxy_port" == "" ]; then
+        printf "\n\033[1;31mError: Could not find an available port for Z.AI proxy\033[0m\n"
+        exit 1
+    fi
     
-    # Start the proxy in the background with command-line flags
-    "${CONFIG_DIR}/z-ai-proxy" \
-        -port "$proxy_port" \
-        -z-ai-url "$proxy_base_url" \
-        -z-ai-token "$proxy_auth_token" > /dev/null 2>&1 &
-    proxy_pid=$!
-    
-    # Give proxy time to start
-    sleep 2
+    # Check if proxy binary exists
+    if [ ! -f "${CONFIG_DIR}/z-ai-proxy" ]; then
+        printf "\n\033[1;31mError: z-ai-proxy binary not found at ${CONFIG_DIR}/z-ai-proxy\033[0m\n"
+        printf "Please run install.sh to build the proxy\n"
+        exit 1
+    fi
+    # Start the proxy using the start_proxy function
+    if ! start_proxy "zai" "$proxy_port" "$proxy_base_url" "$proxy_auth_token" "${CONFIG_DIR}/z-ai-proxy"; then
+        exit 1
+    fi
     
     # Override base URL to point to the local proxy
     export ANTHROPIC_BASE_URL="http://127.0.0.1:${proxy_port}"
     export ANTHROPIC_AUTH_TOKEN="$proxy_auth_token"
     export ANTHROPIC_MODEL="$SELECTED_MODEL"
-    
-    # Show that proxy is ready
-    printf "\n✓ Z.AI proxy started on port %s\n" "$proxy_port"
-    
-    # Clean up proxy when claude exits
-    trap "kill $proxy_pid 2>/dev/null; sleep 0.5; lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true" EXIT
 fi
 
 # For X.AI provider, start the proxy server
@@ -623,41 +856,15 @@ if [ "$SELECTED_PROVIDER" == "xai" ]; then
         exit 1
     fi
     
-    # Kill any existing process on port 9001
-    proxy_port=9001
-    lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    sleep 0.5
-    
-    # Start the proxy in the background with command-line flags
-    # Use a log file to capture errors
-    proxy_log="${CONFIG_DIR}/x-ai-proxy.log"
-    "${CONFIG_DIR}/x-ai-proxy" \
-        -port "$proxy_port" \
-        -xai-url "$proxy_base_url" \
-        -xai-token "$proxy_auth_token" > "$proxy_log" 2>&1 &
-    proxy_pid=$!
-    
-    # Give proxy time to start and verify it's running
-    sleep 2
-    
-    # Check if proxy process is still running
-    if ! ps -p $proxy_pid > /dev/null 2>&1; then
-        printf "\n\033[1;31mError: X.AI proxy failed to start\033[0m\n"
-        if [ -f "$proxy_log" ]; then
-            printf "Proxy error log:\n"
-            cat "$proxy_log"
-        fi
+    # Find an available random port
+    proxy_port=$(find_random_port)
+    if [ -z "$proxy_port" ] || [ "$proxy_port" == "" ]; then
+        printf "\n\033[1;31mError: Could not find an available port for X.AI proxy\033[0m\n"
         exit 1
     fi
     
-    # Verify proxy is listening on the port
-    if ! lsof -ti:${proxy_port} > /dev/null 2>&1; then
-        printf "\n\033[1;31mError: X.AI proxy is not listening on port %s\033[0m\n" "$proxy_port"
-        if [ -f "$proxy_log" ]; then
-            printf "Proxy error log:\n"
-            cat "$proxy_log"
-        fi
-        kill $proxy_pid 2>/dev/null || true
+    # Start the proxy using the start_proxy function
+    if ! start_proxy "xai" "$proxy_port" "$proxy_base_url" "$proxy_auth_token" "${CONFIG_DIR}/x-ai-proxy"; then
         exit 1
     fi
     
@@ -665,17 +872,16 @@ if [ "$SELECTED_PROVIDER" == "xai" ]; then
     export ANTHROPIC_BASE_URL="http://127.0.0.1:${proxy_port}"
     export ANTHROPIC_AUTH_TOKEN="$proxy_auth_token"
     export ANTHROPIC_MODEL="$SELECTED_MODEL"
-    
-    # Show that proxy is ready
-    printf "\n✓ X.AI proxy started on port %s\n" "$proxy_port"
-    
-    # Clean up proxy when claude exits
-    trap "kill $proxy_pid 2>/dev/null; sleep 0.5; lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true; rm -f '$proxy_log' 2>/dev/null" EXIT
 fi
 
 # Run claude command - start interactive session
 claude
 exit_code=$?
 
-# Cleanup happens automatically via trap
+# Explicit cleanup before exit (trap will also handle it, but this ensures it happens)
+if [ "$PROXY_CLEANED_UP" = false ] && ([ -n "$PROXY_PID" ] || [ -n "$PROXY_PORT" ]); then
+    cleanup_proxy "$PROXY_PORT" "$PROXY_PID" "$PROXY_LOG" 2>/dev/null || true
+    PROXY_CLEANED_UP=true
+fi
+
 exit $exit_code
