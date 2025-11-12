@@ -44,12 +44,30 @@ fetch_models_from_api() {
     local base_url="$1"
     local auth_token="$2"
 
-    # Try to fetch models from /models endpoint
-    local models=$(curl -s -H "Authorization: Bearer ${auth_token}" \
-        "${base_url%/}/models" 2>/dev/null | jq -r '.data[].id' 2>/dev/null)
+    # Fetch models from /models endpoint with Bearer token
+    local response=$(curl -s -H "Authorization: Bearer ${auth_token}" \
+        "${base_url%/}/models" 2>/dev/null)
+
+    # Try multiple response formats
+    local models=$(echo "$response" | jq -r '.data[].id' 2>/dev/null)
+    
+    # If no .data[].id, try .data[].model_id
+    if [ -z "$models" ]; then
+        models=$(echo "$response" | jq -r '.data[].model_id' 2>/dev/null)
+    fi
+    
+    # If still no models, try .model[] (for Z.AI format)
+    if [ -z "$models" ]; then
+        models=$(echo "$response" | jq -r '.model[]' 2>/dev/null)
+    fi
+    
+    # If still no models, try .[].id
+    if [ -z "$models" ]; then
+        models=$(echo "$response" | jq -r '.[].id' 2>/dev/null)
+    fi
 
     if [ -z "$models" ]; then
-        # Fallback: return empty if fetch fails
+        # Return empty if fetch fails
         echo ""
     else
         echo "$models"
@@ -94,21 +112,17 @@ cache_recent_model() {
     fi
 }
 
-# Function to create claude config
+# Function to create claude config - export env vars instead of creating settings.json
+# This allows Claude to use environment variables which it checks first
 create_claude_config() {
     local base_url="$1"
     local auth_token="$2"
     local model="$3"
     
-    cat > "${CLAUDE_CONFIG_FILE}" << EOF
-{
-    "env": {
-        "ANTHROPIC_BASE_URL": "${base_url}",
-        "ANTHROPIC_AUTH_TOKEN": "${auth_token}",
-        "ANTHROPIC_MODEL": "${model}"
-    }
-}
-EOF
+    # Export environment variables for Claude CLI
+    export ANTHROPIC_BASE_URL="${base_url}"
+    export ANTHROPIC_AUTH_TOKEN="${auth_token}"
+    export ANTHROPIC_MODEL="${model}"
 }
 
 # Function to extract provider data
@@ -266,6 +280,7 @@ show_provider_menu() {
                 SELECTED_MODEL="$selected_item"
                 SELECTED_MODEL="${SELECTED_MODEL#★ }"  # Remove leading star and space
                 selected_provider_data=$(jq -c ".[] | select(.provider == \"$SELECTED_PROVIDER\")" "${SETTINGS_FILE}")
+                export selected_provider_data  # Make it accessible outside the function
                 # Cache this model as recently used
                 cache_recent_model "$SELECTED_PROVIDER" "$SELECTED_MODEL"
                 apply_provider_config
@@ -274,6 +289,7 @@ show_provider_menu() {
             
             # If selecting Claude
             if [ "$selected_item" == "claude" ]; then
+                SELECTED_PROVIDER="claude"
                 if [ -f "${CLAUDE_CONFIG_FILE}" ]; then
                     rm "${CLAUDE_CONFIG_FILE}"
                 fi
@@ -308,10 +324,13 @@ show_provider_menu() {
                 local provider_data=$(jq -c ".[] | select(.provider == \"$selected_item\")" "${SETTINGS_FILE}")
                 local base_url=$(echo "$provider_data" | jq -r '.base_url')
                 local auth_token=$(echo "$provider_data" | jq -r '.auth_token')
+                if [ "$selected_item" == "zai" ]; then
+                    base_url="https://api.z.ai/api/paas/v4/"
+                fi
                 local models=()
                 local cached_models=()
 
-                # ALWAYS fetch all models from API (don't use settings.json models list)
+                # Try to fetch all models from API, fall back to settings.json if it fails
                 # NOTE: Using sort -f for case-insensitive sorting but preserving original case
                 local api_models=$(fetch_models_from_api "$base_url" "$auth_token" 2>/dev/null | grep -v '/.*/' | sort -f)
                 while IFS= read -r model; do
@@ -319,6 +338,16 @@ show_provider_menu() {
                         models+=("$model")
                     fi
                 done <<< "$api_models"
+                
+                # If API fetch failed, fall back to settings.json models
+                if [ ${#models[@]} -eq 0 ]; then
+                    local settings_models=$(jq -r ".[] | select(.provider == \"${selected_item}\") | .models[]?" "${SETTINGS_FILE}" 2>/dev/null | grep -v '/.*/' | sort -f)
+                    while IFS= read -r model; do
+                        if [ -n "$model" ]; then
+                            models+=("$model")
+                        fi
+                    done <<< "$settings_models"
+                fi
 
                 # Get cached/recent models for this provider from settings.json to display first
                 local cached_list=$(jq -r ".[] | select(.provider == \"${selected_item}\") | .models[]?" "${SETTINGS_FILE}" 2>/dev/null)
@@ -398,6 +427,9 @@ show_model_menu() {
     # Extract models array (from settings or fetch dynamically)
     local base_url=$(echo "$selected_provider_data" | jq -r '.base_url')
     local auth_token=$(echo "$selected_provider_data" | jq -r '.auth_token')
+    if [ "$SELECTED_PROVIDER" == "zai" ]; then
+        base_url="https://api.z.ai/api/paas/v4/"
+    fi
 
     while IFS= read -r model; do
         if [ -n "$model" ]; then
@@ -529,10 +561,44 @@ apply_provider_config() {
 # Show menu and get selection
 show_menu
 
-# Debug: Show what we're about to run
-if [ "${DEBUG:-0}" == "1" ]; then
-    echo "[DEBUG] About to execute: claude with args: '$@'" >&2
+# For Z.AI provider, start the proxy server
+if [ "$SELECTED_PROVIDER" == "zai" ]; then
+    # Extract base_url and auth_token from provider config
+    proxy_base_url=$(echo "$selected_provider_data" | jq -r '.base_url')
+    proxy_auth_token=$(echo "$selected_provider_data" | jq -r '.auth_token')
+    # Override to use the correct Z.AI API endpoint
+    proxy_base_url="https://api.z.ai/api/paas/v4"
+    
+    # Kill any existing process on port 9000
+    proxy_port=9000
+    lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    sleep 0.5
+    
+    # Start the proxy in the background with command-line flags
+    "${CONFIG_DIR}/z-ai-proxy" \
+        -port "$proxy_port" \
+        -z-ai-url "$proxy_base_url" \
+        -z-ai-token "$proxy_auth_token" > /dev/null 2>&1 &
+    proxy_pid=$!
+    
+    # Give proxy time to start
+    sleep 2
+    
+    # Override base URL to point to the local proxy
+    export ANTHROPIC_BASE_URL="http://127.0.0.1:${proxy_port}"
+    export ANTHROPIC_AUTH_TOKEN="$proxy_auth_token"
+    export ANTHROPIC_MODEL="$SELECTED_MODEL"
+    
+    # Show that proxy is ready
+    printf "\n✓ Z.AI proxy started on port %s\n" "$proxy_port"
+    
+    # Clean up proxy when claude exits
+    trap "kill $proxy_pid 2>/dev/null; sleep 0.5; lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true" EXIT
 fi
 
-# Run claude command and pass all arguments
-exec claude "$@"
+# Run claude command - start interactive session
+claude
+exit_code=$?
+
+# Cleanup happens automatically via trap
+exit $exit_code

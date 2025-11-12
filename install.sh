@@ -61,6 +61,13 @@ check_requirements() {
         print_success "claude CLI is installed"
     fi
     
+    # Check for Go compiler (needed for z-ai-proxy)
+    if ! command -v go &> /dev/null; then
+        missing_deps+=("go")
+    else
+        print_success "Go compiler is installed"
+    fi
+    
     # Check bash version
     if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
         missing_deps+=("bash 4.0+")
@@ -105,6 +112,25 @@ install_script() {
     cp "$SCRIPT_DIR/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
     chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
     print_success "Installed $SCRIPT_NAME to $INSTALL_DIR"
+}
+
+build_proxy() {
+    print_step "Building z-ai-proxy..."
+    
+    if [ ! -f "$SCRIPT_DIR/z-ai-proxy.go" ]; then
+        print_error "z-ai-proxy.go not found: $SCRIPT_DIR/z-ai-proxy.go"
+        return 1
+    fi
+    
+    # Build the proxy binary
+    if ! go build -o "$CONFIG_DIR/z-ai-proxy" "$SCRIPT_DIR/z-ai-proxy.go" 2>/dev/null; then
+        print_error "Failed to build z-ai-proxy"
+        print_info "Make sure Go is installed and z-ai-proxy.go is valid"
+        return 1
+    fi
+    
+    chmod +x "$CONFIG_DIR/z-ai-proxy"
+    print_success "Built and installed z-ai-proxy to $CONFIG_DIR"
 }
 
 check_path() {
@@ -220,6 +246,27 @@ install_jq_platform() {
     esac
 }
 
+install_go_platform() {
+    local platform="$1"
+    
+    case "$platform" in
+        macOS)
+            echo "  brew install go"
+            ;;
+        ubuntu|debian)
+            echo "  sudo apt-get update && sudo apt-get install -y golang-go"
+            echo "  # Or install latest from: https://go.dev/dl/"
+            ;;
+        fedora|rhel|centos)
+            echo "  sudo dnf install -y golang  # or: sudo yum install -y golang"
+            echo "  # Or install latest from: https://go.dev/dl/"
+            ;;
+        *)
+            echo "  Visit: https://go.dev/dl/"
+            ;;
+    esac
+}
+
 main() {
     print_header
     echo ""
@@ -249,11 +296,17 @@ main() {
             echo "  Visit: https://github.com/anthropics/claude-cli"
             echo ""
         fi
+        if ! command -v go &> /dev/null; then
+            echo "  To install Go:"
+            install_go_platform "$platform"
+            echo ""
+        fi
         exit 1
     fi
     
     create_directories
     install_script
+    build_proxy
     check_path
     setup_configuration
     print_completion
