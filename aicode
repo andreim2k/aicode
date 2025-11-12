@@ -596,6 +596,83 @@ if [ "$SELECTED_PROVIDER" == "zai" ]; then
     trap "kill $proxy_pid 2>/dev/null; sleep 0.5; lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true" EXIT
 fi
 
+# For X.AI provider, start the proxy server
+if [ "$SELECTED_PROVIDER" == "xai" ]; then
+    # Ensure selected_provider_data is available
+    if [ -z "$selected_provider_data" ]; then
+        selected_provider_data=$(jq -c ".[] | select(.provider == \"xai\")" "${SETTINGS_FILE}")
+    fi
+    
+    # Extract base_url and auth_token from provider config
+    proxy_base_url=$(echo "$selected_provider_data" | jq -r '.base_url')
+    proxy_auth_token=$(echo "$selected_provider_data" | jq -r '.auth_token')
+    
+    # Validate we got the data
+    if [ "$proxy_auth_token" == "null" ] || [ -z "$proxy_auth_token" ]; then
+        printf "\n\033[1;31mError: X.AI auth token not found in settings\033[0m\n"
+        exit 1
+    fi
+    
+    # Override to use the correct X.AI API endpoint
+    proxy_base_url="https://api.x.ai/v1"
+    
+    # Check if proxy binary exists
+    if [ ! -f "${CONFIG_DIR}/x-ai-proxy" ]; then
+        printf "\n\033[1;31mError: x-ai-proxy binary not found at ${CONFIG_DIR}/x-ai-proxy\033[0m\n"
+        printf "Please run install.sh to build the proxy\n"
+        exit 1
+    fi
+    
+    # Kill any existing process on port 9001
+    proxy_port=9001
+    lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    sleep 0.5
+    
+    # Start the proxy in the background with command-line flags
+    # Use a log file to capture errors
+    proxy_log="${CONFIG_DIR}/x-ai-proxy.log"
+    "${CONFIG_DIR}/x-ai-proxy" \
+        -port "$proxy_port" \
+        -xai-url "$proxy_base_url" \
+        -xai-token "$proxy_auth_token" > "$proxy_log" 2>&1 &
+    proxy_pid=$!
+    
+    # Give proxy time to start and verify it's running
+    sleep 2
+    
+    # Check if proxy process is still running
+    if ! ps -p $proxy_pid > /dev/null 2>&1; then
+        printf "\n\033[1;31mError: X.AI proxy failed to start\033[0m\n"
+        if [ -f "$proxy_log" ]; then
+            printf "Proxy error log:\n"
+            cat "$proxy_log"
+        fi
+        exit 1
+    fi
+    
+    # Verify proxy is listening on the port
+    if ! lsof -ti:${proxy_port} > /dev/null 2>&1; then
+        printf "\n\033[1;31mError: X.AI proxy is not listening on port %s\033[0m\n" "$proxy_port"
+        if [ -f "$proxy_log" ]; then
+            printf "Proxy error log:\n"
+            cat "$proxy_log"
+        fi
+        kill $proxy_pid 2>/dev/null || true
+        exit 1
+    fi
+    
+    # Override base URL to point to the local proxy
+    export ANTHROPIC_BASE_URL="http://127.0.0.1:${proxy_port}"
+    export ANTHROPIC_AUTH_TOKEN="$proxy_auth_token"
+    export ANTHROPIC_MODEL="$SELECTED_MODEL"
+    
+    # Show that proxy is ready
+    printf "\n✓ X.AI proxy started on port %s\n" "$proxy_port"
+    
+    # Clean up proxy when claude exits
+    trap "kill $proxy_pid 2>/dev/null; sleep 0.5; lsof -ti:${proxy_port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true; rm -f '$proxy_log' 2>/dev/null" EXIT
+fi
+
 # Run claude command - start interactive session
 claude
 exit_code=$?

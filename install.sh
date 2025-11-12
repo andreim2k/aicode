@@ -115,22 +115,33 @@ install_script() {
 }
 
 build_proxy() {
-    print_step "Building z-ai-proxy..."
+    print_step "Building proxy binaries..."
     
-    if [ ! -f "$SCRIPT_DIR/z-ai-proxy.go" ]; then
-        print_error "z-ai-proxy.go not found: $SCRIPT_DIR/z-ai-proxy.go"
-        return 1
+    # Build z-ai-proxy
+    if [ -f "$SCRIPT_DIR/z-ai-proxy.go" ]; then
+        if ! go build -o "$CONFIG_DIR/z-ai-proxy" "$SCRIPT_DIR/z-ai-proxy.go" 2>/dev/null; then
+            print_error "Failed to build z-ai-proxy"
+            print_info "Make sure Go is installed and z-ai-proxy.go is valid"
+            return 1
+        fi
+        chmod +x "$CONFIG_DIR/z-ai-proxy"
+        print_success "Built and installed z-ai-proxy to $CONFIG_DIR"
+    else
+        print_info "z-ai-proxy.go not found, skipping z-ai-proxy build"
     fi
     
-    # Build the proxy binary
-    if ! go build -o "$CONFIG_DIR/z-ai-proxy" "$SCRIPT_DIR/z-ai-proxy.go" 2>/dev/null; then
-        print_error "Failed to build z-ai-proxy"
-        print_info "Make sure Go is installed and z-ai-proxy.go is valid"
-        return 1
+    # Build x-ai-proxy
+    if [ -f "$SCRIPT_DIR/x-ai-proxy.go" ]; then
+        if ! go build -o "$CONFIG_DIR/x-ai-proxy" "$SCRIPT_DIR/x-ai-proxy.go" 2>/dev/null; then
+            print_error "Failed to build x-ai-proxy"
+            print_info "Make sure Go is installed and x-ai-proxy.go is valid"
+            return 1
+        fi
+        chmod +x "$CONFIG_DIR/x-ai-proxy"
+        print_success "Built and installed x-ai-proxy to $CONFIG_DIR"
+    else
+        print_info "x-ai-proxy.go not found, skipping x-ai-proxy build"
     fi
-    
-    chmod +x "$CONFIG_DIR/z-ai-proxy"
-    print_success "Built and installed z-ai-proxy to $CONFIG_DIR"
 }
 
 check_path() {
