@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # aicode Installation Script for macOS and Linux
 # This script installs aicode and sets up the required configuration directories
@@ -61,13 +61,6 @@ check_requirements() {
         print_success "claude CLI is installed"
     fi
     
-    # Check for Go compiler (needed for z-ai-proxy)
-    if ! command -v go &> /dev/null; then
-        missing_deps+=("go")
-    else
-        print_success "Go compiler is installed"
-    fi
-    
     # Check bash version
     if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
         missing_deps+=("bash 4.0+")
@@ -112,54 +105,6 @@ install_script() {
     cp "$SCRIPT_DIR/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
     chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
     print_success "Installed $SCRIPT_NAME to $INSTALL_DIR"
-}
-
-build_proxy() {
-    print_step "Building proxy binaries..."
-    
-    # Change to script directory for building (needed for go.mod)
-    cd "$SCRIPT_DIR" || {
-        print_error "Failed to change to script directory"
-        return 1
-    }
-    
-    # Build z-ai-proxy
-    if [ -f "$SCRIPT_DIR/z-ai-proxy.go" ]; then
-        print_info "Building z-ai-proxy..."
-        if ! go build -o "$CONFIG_DIR/z-ai-proxy" "$SCRIPT_DIR/z-ai-proxy.go" 2>&1 | tee /tmp/z-ai-proxy-build.log; then
-            print_error "Failed to build z-ai-proxy"
-            if [ -f /tmp/z-ai-proxy-build.log ]; then
-                print_info "Build errors:"
-                cat /tmp/z-ai-proxy-build.log
-            fi
-            print_info "Make sure Go is installed and dependencies are available (run: go mod tidy)"
-            return 1
-        fi
-        chmod +x "$CONFIG_DIR/z-ai-proxy"
-        print_success "Built and installed z-ai-proxy to $CONFIG_DIR"
-        rm -f /tmp/z-ai-proxy-build.log 2>/dev/null || true
-    else
-        print_info "z-ai-proxy.go not found, skipping z-ai-proxy build"
-    fi
-    
-    # Build x-ai-proxy
-    if [ -f "$SCRIPT_DIR/x-ai-proxy.go" ]; then
-        print_info "Building x-ai-proxy..."
-        if ! go build -o "$CONFIG_DIR/x-ai-proxy" "$SCRIPT_DIR/x-ai-proxy.go" 2>&1 | tee /tmp/x-ai-proxy-build.log; then
-            print_error "Failed to build x-ai-proxy"
-            if [ -f /tmp/x-ai-proxy-build.log ]; then
-                print_info "Build errors:"
-                cat /tmp/x-ai-proxy-build.log
-            fi
-            print_info "Make sure Go is installed and dependencies are available (run: go mod tidy)"
-            return 1
-        fi
-        chmod +x "$CONFIG_DIR/x-ai-proxy"
-        print_success "Built and installed x-ai-proxy to $CONFIG_DIR"
-        rm -f /tmp/x-ai-proxy-build.log 2>/dev/null || true
-    else
-        print_info "x-ai-proxy.go not found, skipping x-ai-proxy build"
-    fi
 }
 
 check_path() {
@@ -275,27 +220,6 @@ install_jq_platform() {
     esac
 }
 
-install_go_platform() {
-    local platform="$1"
-    
-    case "$platform" in
-        macOS)
-            echo "  brew install go"
-            ;;
-        ubuntu|debian)
-            echo "  sudo apt-get update && sudo apt-get install -y golang-go"
-            echo "  # Or install latest from: https://go.dev/dl/"
-            ;;
-        fedora|rhel|centos)
-            echo "  sudo dnf install -y golang  # or: sudo yum install -y golang"
-            echo "  # Or install latest from: https://go.dev/dl/"
-            ;;
-        *)
-            echo "  Visit: https://go.dev/dl/"
-            ;;
-    esac
-}
-
 main() {
     print_header
     echo ""
@@ -325,9 +249,14 @@ main() {
             echo "  Visit: https://github.com/anthropics/claude-cli"
             echo ""
         fi
-        if ! command -v go &> /dev/null; then
-            echo "  To install Go:"
-            install_go_platform "$platform"
+        if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+            echo "  To install bash 4.0+:"
+            if [ "$platform" == "macOS" ]; then
+                echo "    brew install bash"
+                echo "    Then update the shebang in this script to use the newer bash"
+            else
+                echo "    Visit: https://www.gnu.org/software/bash/"
+            fi
             echo ""
         fi
         exit 1
@@ -335,7 +264,6 @@ main() {
     
     create_directories
     install_script
-    build_proxy
     check_path
     setup_configuration
     print_completion
